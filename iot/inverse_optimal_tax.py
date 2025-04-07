@@ -354,6 +354,80 @@ class IOT:
             f = pln_pdf(z_line, mu, sigma, alpha)
             F = pln_cdf(z_line, mu, sigma, alpha)
             f_prime = pln_dpdf(z_line, mu, sigma, alpha)
+        elif dist_type == "kde_pareto":
+            # Step 1: Estimate KDE on all data
+            f_kde = st.gaussian_kde(
+                data[income_measure],
+                bw_method=kde_bw,
+                weights=data[weight_var],
+            )
+            
+            # Step 2: Choose t1 and t2 (90th and 95th percentiles)
+            sorted_indices = np.argsort(data[income_measure])
+            sorted_income = data[income_measure].iloc[sorted_indices].values
+            sorted_weights = data[weight_var].iloc[sorted_indices].values
+            cumulative_weights = np.cumsum(sorted_weights) / np.sum(sorted_weights)
+            
+            t1_idx = np.searchsorted(cumulative_weights, 0.90)
+            t2_idx = np.searchsorted(cumulative_weights, 0.95)
+            t1 = sorted_income[t1_idx]
+            t2 = sorted_income[t2_idx]
+            # print(f"t1: {t1}, t2: {t2}")
+            
+            # Step 3: Estimate Pareto distribution on data >= t1
+            pareto_data = data[data[income_measure] >= t1]
+            log_ratio = np.log(pareto_data[income_measure].values / t1)
+            alpha = 1 + 1 / (np.sum(log_ratio * pareto_data[weight_var].values) / np.sum(pareto_data[weight_var].values))
+            print(f"alpha: {alpha}")
+            
+            # Step 4: Define Pareto PDF and smoothing function
+            def f_pareto(z):
+                return alpha * (t1 ** alpha) / (z ** (alpha + 1))
+            
+            def s(z):
+                y = np.clip((z - t1) / (t2 - t1), 0, 1)
+                return 6 * (y ** 5) - 15 * (y ** 4) + 10 * (y ** 3)
+            
+            # Calculate B for continuity at t1 and set initial A=1
+            B = f_kde(t1) / f_pareto(t1)
+            A = 1.0
+            
+            # Define combined PDF
+            def f_combined(z):
+                result = np.zeros_like(z, dtype=float)
+                
+                # z < t1: A * f_kde
+                mask_lower = z < t1
+                if np.any(mask_lower):
+                    result[mask_lower] = A * f_kde(z[mask_lower])
+                
+                # t1 <= z <= t2: Smooth transition
+                mask_middle = (z >= t1) & (z <= t2)
+                if np.any(mask_middle):
+                    z_middle = z[mask_middle]
+                    s_values = s(z_middle)
+                    result[mask_middle] = (1 - s_values) * A * f_kde(z_middle) + s_values * B * f_pareto(z_middle)
+                
+                # z > t2: B * f_pareto
+                mask_upper = z > t2
+                if np.any(mask_upper):
+                    result[mask_upper] = B * f_pareto(z[mask_upper])
+                
+                return result
+            
+            # Calculate PDF and normalize
+            f = f_combined(z_line)
+            integral = np.trapz(f, z_line)
+            f = f / integral
+            
+            # Calculate CDF properly using trapezoidal rule
+            dx = z_line[1] - z_line[0]
+            F = np.zeros_like(z_line)
+            for i in range(1, len(z_line)):
+                F[i] = F[i-1] + 0.5 * (f[i] + f[i-1]) * dx
+            
+            # Calculate derivative of PDF
+            f_prime = np.gradient(f, dx, edge_order=2)
         else:
             print("Please enter a valid value for dist_type")
             assert False
